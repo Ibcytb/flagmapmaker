@@ -164,6 +164,28 @@ const TERRITORY_OF = {
 /** 확장 병합에서 '속령 포함'을 끄면 제외되는 항목 */
 const TERRITORY = new Set(Object.keys(TERRITORY_OF));
 
+/** 지도 폴리곤만으로는 잡히지 않는 접경 — 해외영토·월경지 때문에 생기는 국경이라
+ *  '속령 함께 병합'을 켰을 때만 인접으로 취급한다.
+ *  · GI–ES : 지브롤터(영국령)는 스페인과 맞닿아 있지만, 이 지도에서는 폴리곤이
+ *            0.04 단위 떨어져 그려져 있어 좌표를 공유하지 않는다.
+ *  · ES–MA : 세우타·멜리야·플라사스 데 소베라니아(스페인령)가 모로코와 접하지만,
+ *            이 지도에는 그 폴리곤 자체가 없다. */
+const TERRITORY_BORDERS = [
+  ['GI', 'ES'],
+  ['ES', 'MA']
+];
+let ADJ_X = null;
+function extraAdjacency() {
+  if (ADJ_X) return ADJ_X;
+  ADJ_X = {};
+  TERRITORY_BORDERS.forEach(([a, b]) => {
+    if (!PATHS[a] || !PATHS[b]) return;
+    (ADJ_X[a] || (ADJ_X[a] = new Set())).add(b);
+    (ADJ_X[b] || (ADJ_X[b] = new Set())).add(a);
+  });
+  return ADJ_X;
+}
+
 /** 국경이 맞닿은 나라 그래프. 이 SVG 는 이웃한 나라끼리 꼭짓점 좌표가 정확히
  *  일치하므로(비이웃은 0개) 좌표 해시로 정확한 인접 관계를 얻을 수 있다.
  *  꼭짓점 1개만 닿는 경우는 국경이 아니라 점 접촉이므로 제외(2개 이상). */
@@ -206,13 +228,17 @@ function adjacency() {
 
 /** 엔티티와 국경을 맞댄 다른 엔티티들 */
 function neighborEntities(ent, incTerr) {
-  const adj = adjacency(), out = new Set();
-  ent.members.forEach(m => (adj[m] || []).forEach(n => {
-    const e2 = entOf(n);
-    if (!e2 || e2.id === ent.id || e2.hidden) return;
-    if (!incTerr && e2.members.every(x => TERRITORY.has(x))) return;
-    out.add(e2.id);
-  }));
+  const adj = adjacency(), ext = incTerr ? extraAdjacency() : null, out = new Set();
+  ent.members.forEach(m => {
+    const list = [...(adj[m] || [])];
+    if (ext && ext[m]) list.push(...ext[m]);
+    list.forEach(n => {
+      const e2 = entOf(n);
+      if (!e2 || e2.id === ent.id || e2.hidden) return;
+      if (!incTerr && e2.members.every(x => TERRITORY.has(x))) return;
+      out.add(e2.id);
+    });
+  });
   return out;
 }
 
