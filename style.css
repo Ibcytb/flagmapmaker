@@ -144,6 +144,11 @@ main{flex:1;display:flex;min-height:0}
 }
 .merged-item:hover{border-color:var(--line)}
 .merged-item.on{border-color:var(--accent)}
+.merged-item.act{border-color:var(--accent);background:#2b3444}
+.members.pick span{cursor:pointer;user-select:none}
+.members.pick span:hover{background:#3a4150}
+.members.pick span.on{background:var(--accent);color:#06172e;font-weight:600}
+.members.pick span.grouped{outline:1px solid #5a6273}
 .merged-item.off{opacity:.45}
 .merged-item.off .nm{text-decoration:line-through}
 .merged-item .sw{width:26px;height:17px;border-radius:3px;flex:0 0 26px;background:#555;overflow:hidden;border:1px solid #0004}

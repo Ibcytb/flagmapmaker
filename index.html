@@ -55,8 +55,36 @@
       </label>
     </section>
 
+    <section class="pane" id="pane-expand" hidden>
+      <h3>인접 확장 병합</h3>
+      <label class="row"><span>단계 (배)</span>
+        <input type="range" id="ex-depth" min="1" max="6" step="1" value="1"><output id="ex-depth-o">1</output>
+      </label>
+      <label class="row check" title="본국의 속령을 함께 병합하고, 국경을 맞댄 속령도 확장 대상에 넣습니다"><input type="checkbox" id="ex-terr"><span>속령·해외영토 함께 병합</span></label>
+      <p class="muted" id="ex-preview">—</p>
+      <button id="btn-expand-merge" class="wide primary">확장해서 병합</button>
+      <button id="btn-expand-sel" class="wide">선택만 확장</button>
+    </section>
+
+    <section class="pane" id="pane-scope" hidden>
+      <h3>병합 내부 국기</h3>
+      <div class="tabs" id="scope-tabs">
+        <button class="tab" data-scope="whole">전체 하나</button>
+        <button class="tab" data-scope="each">나라별</button>
+        <button class="tab" data-scope="group">그룹별</button>
+      </div>
+      <div id="unit-list" class="merged-list"></div>
+      <div id="group-tools" hidden>
+        <p class="muted">나라를 골라 그룹으로 묶으세요. 어느 그룹에도 없는 나라는 '나머지'로 함께 처리됩니다.</p>
+        <div id="group-picker" class="members pick"></div>
+        <button id="btn-new-group" class="wide">선택한 나라로 그룹 만들기</button>
+        <button id="btn-del-group" class="wide danger-ghost">현재 그룹 해제</button>
+      </div>
+    </section>
+
     <section class="pane">
       <h3>국기</h3>
+      <p class="muted" id="flag-target-hint" hidden></p>
       <div class="tabs" id="flag-tabs">
         <button class="tab active" data-tab="preset">실제 국기</button>
         <button class="tab" data-tab="design">디자인</button>

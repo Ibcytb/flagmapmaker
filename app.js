@@ -16,6 +16,8 @@ const S = {
   c2e: {},             // iso -> entityId
   sel: new Set(),      // selected entity ids
   seq: 0,
+  gseq: 0,             // 그룹 id 카운터
+  activeUnit: null,    // 병합 내부에서 지금 편집 중인 단위 key
   tool: 'pick',        // 'pick' = 클릭 선택, 'rect' = 직사각형 선택
   opt: {               // 색상은 #rrggbbaa (8자리 hex)
     ocean:'#dfe9f3ff', land:'#f4f4f2ff', border:'#8a8f98ff', bw:1,
@@ -118,11 +120,140 @@ function el(tag, attrs) {
 function addEntity(name, members) {
   const id = 'E' + (++S.seq);
   S.entities[id] = { id, name, members: [...members], flag: null, place: null, hidden: false,
-                     flagMode: 'clamp', flagBg: null };
+                     flagMode: 'clamp', flagBg: null,
+                     flagScope: 'whole', parts: {}, groups: [] };
   members.forEach(m => S.c2e[m] = id);
   return id;
 }
 const entOf = iso => S.entities[S.c2e[iso]];
+
+/* ------------------------------------------------------ 인접 그래프 / 속령 */
+
+/** 속령으로 취급하는 항목 (값 = 본국 ISO 코드).
+ *  나무위키 '속령' 문서의 분류를 이 지도의 257개 폴리곤에 대조한 것으로,
+ *  문서가 나눈 '통합 해외영토(본토의 일부 — GF·GP·MQ·RE·YT·BQ·SJ·HK·MO·AX)' 와
+ *  '속령' 을 구분하지 않고 **모두 속령으로 함께 다룬다**.
+ *  남극(AQ)만 예외 — 어느 나라의 영토도 아니므로 일반 항목으로 둔다.
+ *  PS·TW·XK 는 (부분)승인 국가로 보아 포함하지 않는다. */
+const TERRITORY_OF = {
+  // 프랑스 — 해외 레지옹 · 해외집합체 · 특별공동체 · 해외영토(TOM)
+  GF:'FR', GP:'FR', MQ:'FR', RE:'FR', YT:'FR',
+  BL:'FR', MF:'FR', PF:'FR', PM:'FR', WF:'FR', NC:'FR',
+  TF:'FR', GO:'FR', JU:'FR',
+  // 영국 — 왕실령 · 해외영토
+  IM:'GB', GG:'GB', JE:'GB',
+  AI:'GB', BM:'GB', FK:'GB', GI:'GB', GS:'GB', IO:'GB', KY:'GB',
+  MS:'GB', PN:'GB', SH:'GB', TC:'GB', VG:'GB',
+  // 미국 — 해외영토 · 군소 제도
+  AS:'US', GU:'US', MP:'US', PR:'US', VI:'US',
+  'UM-DQ':'US', 'UM-FQ':'US', 'UM-HQ':'US', 'UM-JQ':'US', 'UM-MQ':'US', 'UM-WQ':'US',
+  // 네덜란드 — 카리브 네덜란드 · 왕국 구성국
+  BQ:'NL', AW:'NL', CW:'NL', SX:'NL',
+  // 중국 — 특별행정구
+  HK:'CN', MO:'CN',
+  // 호주 — 외부영토
+  CC:'AU', CX:'AU', HM:'AU', NF:'AU',
+  // 뉴질랜드 — 속령 · 자유연합
+  TK:'NZ', CK:'NZ', NU:'NZ',
+  // 덴마크 · 노르웨이 · 핀란드
+  GL:'DK', FO:'DK', BV:'NO', SJ:'NO', AX:'FI',
+  // 주권 미확정 (유엔 비자치지역)
+  EH:''
+};
+
+/** 확장 병합에서 '속령 포함'을 끄면 제외되는 항목 */
+const TERRITORY = new Set(Object.keys(TERRITORY_OF));
+
+/** 국경이 맞닿은 나라 그래프. 이 SVG 는 이웃한 나라끼리 꼭짓점 좌표가 정확히
+ *  일치하므로(비이웃은 0개) 좌표 해시로 정확한 인접 관계를 얻을 수 있다.
+ *  꼭짓점 1개만 닿는 경우는 국경이 아니라 점 접촉이므로 제외(2개 이상). */
+let ADJ = null;
+function adjacency() {
+  if (ADJ) return ADJ;
+  const cell = new Map();
+  const re = /(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/g;
+  for (const iso in PATHS) {
+    for (const p of PATHS[iso]) {
+      const d = p.getAttribute('d');
+      let m;
+      re.lastIndex = 0;
+      while ((m = re.exec(d))) {
+        const k = m[1] + ',' + m[2];
+        let s = cell.get(k);
+        if (!s) cell.set(k, s = new Set());
+        s.add(iso);
+      }
+    }
+  }
+  const pairs = new Map();
+  for (const s of cell.values()) {
+    if (s.size < 2) continue;
+    const a = [...s];
+    for (let i = 0; i < a.length; i++) for (let j = i + 1; j < a.length; j++) {
+      const k = a[i] < a[j] ? a[i] + '|' + a[j] : a[j] + '|' + a[i];
+      pairs.set(k, (pairs.get(k) || 0) + 1);
+    }
+  }
+  ADJ = {};
+  for (const [k, n] of pairs) {
+    if (n < 2) continue;
+    const [a, b] = k.split('|');
+    (ADJ[a] || (ADJ[a] = new Set())).add(b);
+    (ADJ[b] || (ADJ[b] = new Set())).add(a);
+  }
+  return ADJ;
+}
+
+/** 엔티티와 국경을 맞댄 다른 엔티티들 */
+function neighborEntities(ent, incTerr) {
+  const adj = adjacency(), out = new Set();
+  ent.members.forEach(m => (adj[m] || []).forEach(n => {
+    const e2 = entOf(n);
+    if (!e2 || e2.id === ent.id || e2.hidden) return;
+    if (!incTerr && e2.members.every(x => TERRITORY.has(x))) return;
+    out.add(e2.id);
+  }));
+  return out;
+}
+
+/** 포함된 나라의 속령을 함께 넣는다. 속령은 본국과 국경을 맞대지 않는 경우가
+ *  대부분이라(프랑스↔프랑스령 기아나) 인접 탐색으로는 닿지 않으므로 따로 붙인다.
+ *  단, 붙인 속령이 다시 인접 탐색의 발판이 되지는 않는다(바다 건너 엉뚱한 확산 방지). */
+function attachTerritories(all) {
+  const isos = new Set([...all].flatMap(id => (S.entities[id] || { members:[] }).members));
+  for (let pass = 0; pass < 3; pass++) {
+    let added = false;
+    for (const t in TERRITORY_OF) {
+      const parent = TERRITORY_OF[t];
+      if (!parent || !isos.has(parent)) continue;
+      const e2 = entOf(t);
+      if (!e2 || e2.hidden || all.has(e2.id)) continue;
+      all.add(e2.id);
+      e2.members.forEach(m => isos.add(m));
+      added = true;
+    }
+    if (!added) break;
+  }
+  return all;
+}
+
+/** 선택을 depth 단계만큼 인접 방향으로 넓힌 엔티티 집합 */
+function expandSelection(depth, incTerr) {
+  const all = new Set(S.sel);
+  let frontier = new Set(S.sel);
+  for (let d = 0; d < depth; d++) {
+    const next = new Set();
+    frontier.forEach(id => {
+      const ent = S.entities[id];
+      if (ent) neighborEntities(ent, incTerr).forEach(nid => {
+        if (!all.has(nid)) { all.add(nid); next.add(nid); }
+      });
+    });
+    if (!next.size) break;
+    frontier = next;
+  }
+  return incTerr ? attachTerritories(all) : all;
+}
 
 /* ------------------------------------------- filters (병합 외곽선 / 선택 표시) */
 function buildFilters() {
@@ -205,13 +336,60 @@ function unionBBox(members) {
   });
   return { x, y, w: Math.max(X-x, 1e-3), h: Math.max(Y-y, 1e-3) };
 }
-const autoBox = ent => unionBBox(ent.members);
-const flagBox = ent => ent.place ? { x:ent.place.x, y:ent.place.y, w:ent.place.w, h:ent.place.h } : autoBox(ent);
-/** 병합된 나라에서 국기를 국가별로 반복할지 (수동 배치 중이면 항상 하나) */
-const perCountry = ent => !ent.place && S.opt.perCountry && ent.members.length > 1;
+/* ------------------------------------------------- 국기 단위(unit) 모델
+   병합된 국가 안에서 국기를 전체 하나 / 나라별 / 그룹별로 나눠 지정할 수 있다.
+   unit = { key, name, members, raw }  ·  raw 는 편집 대상이 되는 객체
+   (엔티티 자신 · ent.parts[iso] · ent.groups[n]). raw 에 없는 속성은 엔티티 값을 상속. */
+function unitsOf(ent) {
+  const scope = ent.flagScope || 'whole';
+  if (scope === 'each')
+    return ent.members.map(m => ({ key: ent.id + '#' + m, name: ORIG[m] || m,
+                                   members: [m], raw: (ent.parts && ent.parts[m]) || {} }));
+  if (scope === 'group') {
+    const used = new Set(), us = [];
+    (ent.groups || []).forEach(g => {
+      const ms = g.members.filter(m => ent.members.includes(m) && !used.has(m));
+      ms.forEach(m => used.add(m));
+      if (ms.length) us.push({ key: ent.id + '#' + g.gid, name: g.name, members: ms, raw: g });
+    });
+    const rest = ent.members.filter(m => !used.has(m));
+    if (rest.length) us.push({ key: ent.id + '#rest', name: '나머지', members: rest, raw: ent });
+    return us;
+  }
+  return [{ key: ent.id, name: ent.name, members: ent.members, raw: ent }];
+}
+/** raw 의 미지정 속성을 엔티티 값으로 채운 실제 표시용 속성 */
+function resolve(ent, raw) {
+  if (raw === ent) return ent;
+  return { flag: ('flag' in raw) ? raw.flag : ent.flag,
+           place: raw.place || null,
+           flagMode: raw.flagMode || ent.flagMode || 'clamp',
+           flagBg: raw.flagBg || ent.flagBg };
+}
+/** 화면에 그릴 모든 단위 */
+function renderUnits() {
+  const out = [];
+  for (const id in S.entities) {
+    const ent = S.entities[id];
+    if (!visible(ent)) continue;
+    unitsOf(ent).forEach(u => out.push({ ...u, ent, props: resolve(ent, u.raw) }));
+  }
+  return out;
+}
+const uid = u => u.key.replace(/[^\w-]/g, '_');
+let UNITS = [], ISO2UNIT = {};        // render() 에서 매번 갱신
+const autoBox = u => unionBBox(u.members);
+const flagBox = u => u.props.place
+  ? { x:u.props.place.x, y:u.props.place.y, w:u.props.place.w, h:u.props.place.h }
+  : autoBox(u);
+/** 국기를 나라별로 반복할지 (수동 배치 중이면 항상 하나) */
+const perCountry = u => !u.props.place && S.opt.perCountry && u.members.length > 1;
 
 /* ------------------------------------------------------------------ render */
 function render() {
+  UNITS = renderUnits();
+  ISO2UNIT = {};
+  UNITS.forEach(u => u.members.forEach(m => ISO2UNIT[m] = u));
   paintClips();
   paintFills();
   paintFlags();
@@ -241,17 +419,16 @@ function clonePaths(members, attrs) {
 /** 국기 이미지를 국가 모양 안쪽으로만 그리기 위한 clipPath */
 function paintClips() {
   [...defs.querySelectorAll('clipPath')].forEach(c => c.remove());
-  for (const id in S.entities) {
-    const ent = S.entities[id];
-    if (!visible(ent) || !flagHref(ent.flag)) continue;
-    const cp = el('clipPath', { id:'clip_' + id });
-    ent.members.forEach(m => (PATHS[m] || []).forEach(p => {
+  UNITS.forEach(u => {
+    if (!flagHref(u.props.flag)) return;
+    const cp = el('clipPath', { id:'clip_' + uid(u) });
+    u.members.forEach(m => (PATHS[m] || []).forEach(p => {
       const c = p.cloneNode(false);
       c.removeAttribute('id');
       cp.appendChild(c);
     }));
     defs.appendChild(cp);
-  }
+  });
 }
 
 function paintFills() {
@@ -262,7 +439,8 @@ function paintFills() {
     PATHS[iso].forEach(p => {
       if (ent.hidden) { p.setAttribute('display', 'none'); return; }
       p.removeAttribute('display');
-      setPaint(p, 'fill', ent.flag && ent.flag.type === 'solid' ? ent.flag.color : S.opt.land);
+      const f = (ISO2UNIT[iso] || { props:ent }).props.flag;
+      setPaint(p, 'fill', f && f.type === 'solid' ? f.color : S.opt.land);
       // 병합된 나라는 내부 국경을 지우고, 바깥 테두리는 외곽선 레이어가 그린다
       if (merged) {
         p.setAttribute('stroke', 'none');
@@ -289,9 +467,9 @@ function imageEl(href, w, h, x = 0, y = 0) {
 /** 국기 상자가 국가를 다 덮지 못해 바깥을 채워야 하는 영역 (필요 없으면 null).
  *  회전 중심에서 국가 bbox 까지의 최대 거리를 반지름으로 하는 정사각형 →
  *  회전해도 국가를 항상 덮는다. (어차피 clipPath 로 잘리므로 넉넉해도 무방) */
-function coverBox(ent, b) {
-  const bb = autoBox(ent);
-  const rot = (ent.place && ent.place.rot) || 0;
+function coverBox(u, b) {
+  const bb = autoBox(u);
+  const rot = (u.props.place && u.props.place.rot) || 0;
   if (!rot && b.x <= bb.x && b.y <= bb.y &&
       b.x + b.w >= bb.x + bb.w && b.y + b.h >= bb.y + bb.h) return null;
   const cx = b.x + b.w/2, cy = b.y + b.h/2;
@@ -328,12 +506,12 @@ function clampPieces(g, href, b, cover) {
 }
 
 /** 국기 상자 + 바깥 채움(모드별)을 g 에 그린다 */
-function fillFlag(g, ent, href, b) {
-  const cover = coverBox(ent, b);
-  const mode = ent.flagMode || 'clamp';
+function fillFlag(g, u, href, b) {
+  const cover = coverBox(u, b);
+  const mode = u.props.flagMode || 'clamp';
   if (cover && mode === 'clamp') { clampPieces(g, href, b, cover); return; }
   if (cover && mode === 'tile') {                       // 패턴으로 무한 반복
-    const pid = 'tile_' + ent.id;
+    const pid = 'tile_' + uid(u);
     const pat = el('pattern', { id:pid, patternUnits:'userSpaceOnUse',
                                 x:b.x, y:b.y, width:b.w, height:b.h });
     pat.appendChild(imageEl(href, b.w, b.h));
@@ -344,7 +522,7 @@ function fillFlag(g, ent, href, b) {
   }
   if (cover && mode === 'solid') {                      // 단색 + 국기 한 장
     const r = el('rect', { x:cover.x, y:cover.y, width:cover.w, height:cover.h });
-    setPaint(r, 'fill', ent.flagBg || S.opt.land);
+    setPaint(r, 'fill', u.props.flagBg || S.opt.land);
     g.appendChild(r);
   }
   g.appendChild(imageEl(href, b.w, b.h, b.x, b.y));
@@ -353,22 +531,21 @@ function fillFlag(g, ent, href, b) {
 function paintFlags() {
   gFlag.textContent = '';
   [...defs.querySelectorAll('pattern')].forEach(p => p.remove());
-  for (const id in S.entities) {
-    const ent = S.entities[id];
-    const href = flagHref(ent.flag);
-    if (!visible(ent) || !href) continue;
-    const outer = el('g', { 'clip-path': `url(#clip_${id})` });
-    if (perCountry(ent)) {                              // 나라별 반복: 각 bbox 에 한 장씩
-      ent.members.forEach(m => outer.appendChild(
+  UNITS.forEach(u => {
+    const href = flagHref(u.props.flag);
+    if (!href) return;
+    const outer = el('g', { 'clip-path': `url(#clip_${uid(u)})` });
+    if (perCountry(u)) {                                // 나라별 반복: 각 bbox 에 한 장씩
+      u.members.forEach(m => outer.appendChild(
         imageEl(href, BBOX[m].w, BBOX[m].h, BBOX[m].x, BBOX[m].y)));
     } else {
-      const b = flagBox(ent), rot = (ent.place && ent.place.rot) || 0;
+      const b = flagBox(u), rot = (u.props.place && u.props.place.rot) || 0;
       const g = rot ? el('g', { transform:`rotate(${rot} ${b.x+b.w/2} ${b.y+b.h/2})` }) : outer;
-      fillFlag(g, ent, href, b);
+      fillFlag(g, u, href, b);
       if (g !== outer) outer.appendChild(g);
     }
     gFlag.appendChild(outer);
-  }
+  });
 }
 
 function paintOutlines() {
@@ -391,13 +568,14 @@ function paintSelection() {
   });
 }
 
-/** 수동 배치용 드래그 사각형 */
+/** 수동 배치용 드래그 사각형 (편집 중인 단위에 대해) */
 function paintHandle() {
   gHandle.textContent = '';
-  const ent = soloSelection();
-  if (!ent || !ent.place || !flagHref(ent.flag)) return;
-  const b = flagBox(ent), upp = userPerPx(), r = 5 * upp;
-  const g = el('g', ent.place.rot ? { transform:`rotate(${ent.place.rot} ${b.x+b.w/2} ${b.y+b.h/2})` } : {});
+  const u = editUnit();
+  if (!u || !u.props.place || !flagHref(u.props.flag)) return;
+  const b = flagBox(u), upp = userPerPx(), r = 5 * upp;
+  const rot = u.props.place.rot;
+  const g = el('g', rot ? { transform:`rotate(${rot} ${b.x+b.w/2} ${b.y+b.h/2})` } : {});
   const box = el('rect', { x:b.x, y:b.y, width:b.w, height:b.h, fill:'none', stroke:'#4c9aff',
                            'stroke-width':1.5, 'stroke-dasharray':'5 4',
                            'vector-effect':'non-scaling-stroke', 'pointer-events':'all' });
@@ -414,8 +592,34 @@ function paintHandle() {
   gHandle.appendChild(g);
 }
 
+/* ------------------------------------------------------- 편집 대상(단위) */
+/** 지금 편집 중인 단위 (표시용 속성 포함). 범위가 '전체'면 엔티티 자체. */
+function editUnit() {
+  const ent = soloSelection();
+  if (!ent) return null;
+  const us = unitsOf(ent);
+  const u = (ent.flagScope || 'whole') === 'whole'
+    ? us[0]
+    : us.find(x => x.key === S.activeUnit);
+  return u ? { ...u, ent, props: resolve(ent, u.raw) } : null;
+}
+/** 편집 대상의 mutable 객체. 나라별 모드에서는 parts 항목을 이때 만든다. */
+function editRaw() {
+  const ent = soloSelection();
+  if (!ent) return null;
+  const scope = ent.flagScope || 'whole';
+  if (scope === 'whole') return ent;
+  const u = unitsOf(ent).find(x => x.key === S.activeUnit);
+  if (!u || u.raw === ent) return u ? ent : null;      // '나머지' 는 엔티티 자체
+  if (scope === 'each') {
+    const iso = u.members[0];
+    ent.parts = ent.parts || {};
+    return (ent.parts[iso] = ent.parts[iso] || u.raw);
+  }
+  return u.raw;                                        // 그룹 객체
+}
 /** 위치 조절이 가능한 국기인가 (단색·국기 없음은 불가) */
-const placeable = ent => !!(ent && flagHref(ent.flag));
+const placeable = u => !!(u && flagHref(u.props.flag));
 
 /* ------------------------------------------------------- 직사각형 선택 도구 */
 const rectOf = m => ({ x1:Math.min(m.x0, m.x1), y1:Math.min(m.y0, m.y1),
@@ -524,8 +728,8 @@ function initUI() {
     // 직사각형 도구여도 Alt / 휠 클릭이면 이동
     const panning = S.tool === 'pick' || e.button === 1 || e.altKey;
     if (g) {                                        // 국기 배치 손잡이
-      const ent = soloSelection();
-      grab = { mode:g, ent, start:p, box:{ ...ent.place } };
+      const raw = editRaw();
+      grab = { mode:g, raw, start:p, box:{ ...raw.place } };
       snapshot();
     } else {
       // 포인터 캡처를 걸면 pointerup 의 target 이 svg 로 바뀌므로 여기서 대상을 기억해 둔다
@@ -541,7 +745,7 @@ function initUI() {
 
   svg.addEventListener('pointermove', e => {
     if (grab) {
-      const p = toUser(e), b = grab.box, pl = grab.ent.place;
+      const p = toUser(e), b = grab.box, pl = grab.raw.place;
       const cx = b.x + b.w/2, cy = b.y + b.h/2;
       if (grab.mode === 'move') {
         pl.x = b.x + (p.x - grab.start.x);
@@ -604,7 +808,13 @@ function initUI() {
     }
     if (wasDrag) return;
     if (!t) { if (!e.ctrlKey && !e.shiftKey) { S.sel.clear(); render(); } return; }
-    const eid = S.c2e[t.getAttribute('id')];
+    const iso = t.getAttribute('id'), eid = S.c2e[iso];
+    const solo = soloSelection();
+    // 병합 내부를 나라별/그룹별로 편집 중이면, 클릭한 나라를 편집 대상으로 삼는다
+    if (solo && solo.id === eid && (solo.flagScope || 'whole') !== 'whole' && !e.ctrlKey && !e.shiftKey) {
+      const u = unitsOf(solo).find(x => x.members.includes(iso));
+      if (u) { S.activeUnit = u.key; render(); return; }
+    }
     if (e.ctrlKey || e.shiftKey) S.sel.has(eid) ? S.sel.delete(eid) : S.sel.add(eid);
     else { S.sel.clear(); S.sel.add(eid); }
     render();
@@ -642,6 +852,58 @@ function initUI() {
       if (e.key === 'r' || e.key === 'R') setTool('rect');
     }
   });
+
+  /* --- 인접 확장 병합 --- */
+  $('#ex-depth').oninput = e => { $('#ex-depth-o').value = e.target.value; updateExpandPane(); };
+  $('#ex-terr').onchange = updateExpandPane;
+  const expand = () => expandSelection(+$('#ex-depth').value, $('#ex-terr').checked);
+  $('#btn-expand-sel').onclick = () => {
+    if (!S.sel.size) return;
+    const all = expand();
+    S.sel = new Set(all);
+    render();
+  };
+  $('#btn-expand-merge').onclick = () => {
+    if (!S.sel.size) return;
+    const all = expand();
+    if (all.size < 2) { alert('맞닿은 나라가 없습니다.'); return; }
+    S.sel = new Set(all);
+    mergeSelected();
+  };
+
+  /* --- 병합 내부 국기 범위 / 그룹 --- */
+  $('#scope-tabs').onclick = e => {
+    const t = e.target.closest('.tab'); if (!t) return;
+    const ent = soloSelection(); if (!ent) return;
+    snapshot();
+    ent.flagScope = t.dataset.scope;
+    ent.parts = ent.parts || {};
+    ent.groups = ent.groups || [];
+    S.activeUnit = null;
+    render();
+  };
+  $('#btn-new-group').onclick = () => {
+    const ent = soloSelection(); if (!ent) return;
+    const picked = $$('#group-picker span.on').map(s => s.textContent);
+    if (!picked.length) { alert('그룹으로 묶을 나라를 먼저 고르세요.'); return; }
+    snapshot();
+    ent.groups = ent.groups || [];
+    ent.groups.forEach(g => g.members = g.members.filter(m => !picked.includes(m)));
+    ent.groups = ent.groups.filter(g => g.members.length);
+    const gid = 'G' + (++S.gseq);
+    ent.groups.push({ gid, name: `그룹 ${ent.groups.length + 1}`, members: picked });
+    S.activeUnit = ent.id + '#' + gid;
+    render();
+  };
+  $('#btn-del-group').onclick = () => {
+    const ent = soloSelection(); if (!ent) return;
+    const u = unitsOf(ent).find(x => x.key === S.activeUnit);
+    if (!u || u.raw === ent) return;
+    snapshot();
+    ent.groups = ent.groups.filter(g => g !== u.raw);
+    S.activeUnit = null;
+    render();
+  };
 
   /* --- 이름 --- */
   $('#entity-name').oninput = e => {
@@ -721,39 +983,41 @@ function initUI() {
   /* --- 국기 배치 --- */
   $('#place-tabs').onclick = e => {
     const t = e.target.closest('.tab'); if (!t) return;
-    const ent = soloSelection();
-    if (!ent) { alert('국가를 하나만 선택하세요.'); return; }
-    if (!placeable(ent)) { alert('이미지·디자인 국기에서만 위치를 조절할 수 있습니다.'); return; }
+    const u = editUnit();
+    if (!u) { alert('국가를 하나만 선택하고, 국기 대상을 고르세요.'); return; }
+    if (!placeable(u)) { alert('이미지·디자인 국기에서만 위치를 조절할 수 있습니다.'); return; }
     snapshot();
-    if (t.dataset.place === 'manual') { const b = flagBox(ent); ent.place = { ...b, rot: (ent.place && ent.place.rot) || 0 }; }
-    else ent.place = null;
+    const raw = editRaw();
+    if (t.dataset.place === 'manual') raw.place = { ...flagBox(u), rot: (raw.place && raw.place.rot) || 0 };
+    else raw.place = null;
     render();
   };
   const plInput = () => {
-    const ent = soloSelection(); if (!ent || !ent.place) return;
-    ent.place.x = +$('#pl-x').value; ent.place.y = +$('#pl-y').value;
-    ent.place.w = Math.max(0.1, +$('#pl-w').value); ent.place.h = Math.max(0.1, +$('#pl-h').value);
-    ent.place.rot = +$('#pl-rot').value;
-    $('#pl-rot-o').value = ent.place.rot + '°';
-    paintFlags(); paintHandle();
+    const raw = editRaw(); if (!raw || !raw.place) return;
+    raw.place.x = +$('#pl-x').value; raw.place.y = +$('#pl-y').value;
+    raw.place.w = Math.max(0.1, +$('#pl-w').value); raw.place.h = Math.max(0.1, +$('#pl-h').value);
+    raw.place.rot = +$('#pl-rot').value;
+    $('#pl-rot-o').value = raw.place.rot + '°';
+    render();
   };
   ['#pl-x','#pl-y','#pl-w','#pl-h','#pl-rot'].forEach(s => $(s).oninput = plInput);
   $('#fmode').onchange = e => {
-    const ent = soloSelection(); if (!ent) return;
+    const raw = editRaw(); if (!raw) return;
     snapshot();
-    ent.flagMode = e.target.value;
-    if (ent.flagMode === 'solid' && !ent.flagBg) ent.flagBg = S.opt.land;
+    raw.flagMode = e.target.value;
+    if (raw.flagMode === 'solid' && !raw.flagBg) raw.flagBg = S.opt.land;
     render();
   };
   $('#fbg').oninput = $('#fbg-a').oninput = () => {
-    const ent = soloSelection(); if (!ent) return;
-    ent.flagBg = joinHex($('#fbg').value, +$('#fbg-a').value / 100);
-    paintFlags();
+    const raw = editRaw(); if (!raw) return;
+    raw.flagBg = joinHex($('#fbg').value, +$('#fbg-a').value / 100);
+    render();
   };
   $('#btn-place-reset').onclick = () => {
-    const ent = soloSelection(); if (!ent || !ent.place) return;
+    const u = editUnit(), raw = editRaw();
+    if (!u || !raw || !raw.place) return;
     snapshot();
-    ent.place = { ...autoBox(ent), rot: 0 };
+    raw.place = { ...autoBox(u), rot: 0 };
     render();
   };
 
@@ -842,14 +1106,14 @@ const hideTip = () => $('#tooltip').style.display = 'none';
 
 /* ------------------------------------------------------ 병합 / 편집 / 정리 */
 function snapshot() {
-  history.push(JSON.stringify({ entities:S.entities, c2e:S.c2e, seq:S.seq }));
+  history.push(JSON.stringify({ entities:S.entities, c2e:S.c2e, seq:S.seq, gseq:S.gseq }));
   if (history.length > 40) history.shift();
 }
 function undo() {
   const h = history.pop(); if (!h) return;
   const d = JSON.parse(h);
-  S.entities = d.entities; S.c2e = d.c2e; S.seq = d.seq;
-  S.sel.clear(); render();
+  S.entities = d.entities; S.c2e = d.c2e; S.seq = d.seq; S.gseq = d.gseq || S.gseq;
+  S.sel.clear(); S.activeUnit = null; render();
 }
 
 function mergeSelected() {
@@ -887,6 +1151,15 @@ function unmergeSelected() {
 
 function applyFlag(make) {
   if (!S.sel.size) { alert('먼저 나라를 선택하세요.'); return; }
+  const ent = soloSelection();
+  if (ent && (ent.flagScope || 'whole') !== 'whole') {   // 병합 내부의 일부에만 적용
+    const raw = editRaw();
+    if (!raw) { alert('국기를 지정할 대상(나라 또는 그룹)을 먼저 고르세요.'); return; }
+    snapshot();
+    raw.flag = make(ent);
+    render();
+    return;
+  }
   snapshot();
   S.sel.forEach(id => S.entities[id].flag = make(S.entities[id]));
   render();
@@ -895,6 +1168,7 @@ function applyFlag(make) {
 /** 사용자가 손댄 국가인가 */
 function isEdited(ent) {
   if (ent.flag || ent.place || ent.members.length > 1) return true;
+  if ((ent.flagScope || 'whole') !== 'whole') return true;
   return ent.name !== (ORIG[ent.members[0]] || ent.members[0]);
 }
 function keepEdited() {
@@ -915,11 +1189,21 @@ function hideSelected() {
 
 async function applyRealFlags(fixedIso) {
   if (!S.sel.size) { alert('먼저 나라를 선택하세요.'); return; }
+  const solo = soloSelection();
+  const sub = solo && (solo.flagScope || 'whole') !== 'whole' ? editRaw() : null;
+  if (solo && (solo.flagScope || 'whole') !== 'whole' && !sub) {
+    alert('국기를 지정할 대상(나라 또는 그룹)을 먼저 고르세요.'); return;
+  }
   snapshot();
   const btns = [$('#btn-own-flag'), $('#btn-apply-preset')];
   btns.forEach(b => b.disabled = true);
   try {
-    for (const id of [...S.sel]) {
+    if (sub) {                                    // 병합 내부의 일부 대상에만
+      const u = editUnit();
+      const iso = (fixedIso || u.members[0]).split('-')[0].toLowerCase();
+      const href = await fetchFlag(iso);
+      if (href) sub.flag = { type:'image', href };
+    } else for (const id of [...S.sel]) {
       const ent = S.entities[id];
       const iso = (fixedIso || ent.members[0]).split('-')[0].toLowerCase();
       const href = await fetchFlag(iso);
@@ -979,13 +1263,16 @@ function updatePanel() {
   $('#btn-merge').disabled = ids.length < 2;
   $('#btn-unmerge').disabled = !ids.some(id => S.entities[id] && S.entities[id].members.length > 1);
   $('#hidden-count').textContent = Object.values(S.entities).filter(e => e.hidden).length;
+  updateExpandPane();
+  updateScopePane();
   syncPlaceInputs();
 }
 
 function syncPlaceInputs() {
-  const ent = soloSelection();
-  const ok = placeable(ent);
-  const manual = ok && !!ent.place;
+  const u = editUnit();
+  const ent = u && u.ent;
+  const ok = placeable(u);
+  const manual = ok && !!u.props.place;
   $$('#place-tabs .tab').forEach(t => {
     t.classList.toggle('active', (t.dataset.place === 'manual') === manual);
     t.disabled = !ok;
@@ -993,24 +1280,109 @@ function syncPlaceInputs() {
   $('#place-fields').hidden = !manual;
   $('#mode-fields').hidden = !ok;
   if (ok) {
-    const mode = ent.flagMode || 'clamp';
+    const mode = u.props.flagMode || 'clamp';
     $('#fmode').value = mode;
     $('#fbg-row').hidden = mode !== 'solid';
-    const bg = splitHex(ent.flagBg || S.opt.land);
+    const bg = splitHex(u.props.flagBg || S.opt.land);
     $('#fbg').value = bg.c;
     $('#fbg-a').value = Math.round(bg.o * 100);
   }
+  const solo = soloSelection();
   const hint = $('#place-hint');
-  hint.textContent = !ent ? '국가를 하나만 선택하면 배치를 조절할 수 있습니다.'
-                   : !ok  ? '이미지·디자인 국기에서만 위치를 조절할 수 있습니다. (단색 제외)'
+  hint.textContent = !solo ? '국가를 하나만 선택하면 배치를 조절할 수 있습니다.'
+                   : !u    ? '위에서 국기를 지정할 대상(나라 또는 그룹)을 고르세요.'
+                   : !ok   ? '이미지·디자인 국기에서만 위치를 조절할 수 있습니다. (단색 제외)'
                    : '자동: 국가 영역에 맞춰 국기를 채웁니다.';
   hint.hidden = manual;
   if (!manual) return;
-  const p = ent.place;
+  const p = u.props.place;
   $('#pl-x').value = +p.x.toFixed(1); $('#pl-y').value = +p.y.toFixed(1);
   $('#pl-w').value = +p.w.toFixed(1); $('#pl-h').value = +p.h.toFixed(1);
   $('#pl-rot').value = p.rot || 0;
   $('#pl-rot-o').value = (p.rot || 0) + '°';
+}
+
+/** 인접 확장 병합 패널 */
+function updateExpandPane() {
+  const pane = $('#pane-expand');
+  pane.hidden = !S.sel.size;
+  if (pane.hidden) return;
+  const depth = +$('#ex-depth').value, terr = $('#ex-terr').checked;
+  const after = expandSelection(depth, terr);
+  const cnt = ids => [...ids].reduce((n, id) => n + (S.entities[id] ? S.entities[id].members.length : 0), 0);
+  $('#ex-preview').textContent =
+    `현재 ${cnt(S.sel)}개국 → ${depth}단계 확장 시 ${cnt(after)}개국 (${after.size}개 덩어리)`;
+}
+
+/** 병합 내부 국기 범위 패널 (전체 / 나라별 / 그룹별) */
+function updateScopePane() {
+  const ent = soloSelection();
+  const pane = $('#pane-scope');
+  // 다른 국가를 선택하면 편집 대상은 자동 해제
+  if (S.activeUnit && (!ent || !S.activeUnit.startsWith(ent.id + '#'))) S.activeUnit = null;
+  pane.hidden = !ent || ent.members.length < 2;
+  const hint = $('#flag-target-hint');
+  if (pane.hidden) { hint.hidden = true; return; }
+
+  const scope = ent.flagScope || 'whole';
+  $$('#scope-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.scope === scope));
+
+  const list = $('#unit-list');
+  list.innerHTML = '';
+  const units = unitsOf(ent);
+  if (scope === 'whole') {
+    list.hidden = true;
+    hint.hidden = true;
+  } else {
+    list.hidden = false;
+    // 유효하지 않은 대상은 해제
+    if (S.activeUnit && !units.some(u => u.key === S.activeUnit)) S.activeUnit = null;
+    units.forEach(u => {
+      const props = resolve(ent, u.raw);
+      const d = document.createElement('div');
+      d.className = 'merged-item' + (u.key === S.activeUnit ? ' act' : '');
+      const sw = document.createElement('div');
+      sw.className = 'sw';
+      if (props.flag && props.flag.type === 'solid') {
+        const { c, o } = splitHex(props.flag.color);
+        sw.style.background = c; sw.style.opacity = o;
+      } else {
+        const h = flagHref(props.flag);
+        if (h) sw.innerHTML = `<img src="${h}" alt="">`;
+      }
+      const nm = document.createElement('div');
+      nm.className = 'nm';
+      nm.textContent = u.name + (('flag' in u.raw) || u.raw === ent ? '' : ' (상속)');
+      const ct = document.createElement('div');
+      ct.className = 'ct'; ct.textContent = u.members.length;
+      d.append(sw, nm, ct);
+      d.onclick = () => { S.activeUnit = u.key; render(); };
+      list.appendChild(d);
+    });
+    const cur = units.find(u => u.key === S.activeUnit);
+    hint.hidden = false;
+    hint.textContent = cur ? `적용 대상: ${cur.name} (${cur.members.length}개국)`
+                           : '적용 대상을 위에서 고르세요.';
+  }
+
+  const gt = $('#group-tools');
+  gt.hidden = scope !== 'group';
+  if (scope === 'group') {
+    const picker = $('#group-picker');
+    picker.innerHTML = '';
+    const inGroup = new Set();
+    (ent.groups || []).forEach(g => g.members.forEach(m => inGroup.add(m)));
+    ent.members.forEach(m => {
+      const s = document.createElement('span');
+      s.textContent = m;
+      s.title = ORIG[m] || m;
+      if (inGroup.has(m)) s.classList.add('grouped');
+      s.onclick = () => { s.classList.toggle('on'); };
+      picker.appendChild(s);
+    });
+    const cur = units.find(u => u.key === S.activeUnit);
+    $('#btn-del-group').disabled = !cur || cur.raw === ent;
+  }
 }
 
 function updateMergedList() {
@@ -1055,7 +1427,7 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 function saveJSON() {
-  const data = { v:2, entities:S.entities, c2e:S.c2e, seq:S.seq, opt:S.opt };
+  const data = { v:3, entities:S.entities, c2e:S.c2e, seq:S.seq, gseq:S.gseq, opt:S.opt };
   download(new Blob([JSON.stringify(data)], { type:'application/json' }), 'flagmap.json');
 }
 function loadJSON(text) {
@@ -1067,7 +1439,12 @@ function loadJSON(text) {
       e.hidden = !!e.hidden;
       e.flagMode = e.flagMode || 'clamp';
       e.flagBg = e.flagBg || null;
+      e.flagScope = e.flagScope || 'whole';
+      e.parts = e.parts || {};
+      e.groups = e.groups || [];
     });
+    S.gseq = d.gseq || 0;
+    S.activeUnit = null;
     Object.assign(S.opt, d.opt || {});
     ['ocean','land','border'].forEach(k => {
       const { c, o } = splitHex(S.opt[k]);
