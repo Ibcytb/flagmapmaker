@@ -172,7 +172,8 @@ const TERRITORY = new Set(Object.keys(TERRITORY_OF));
  *            이 지도에는 그 폴리곤 자체가 없다. */
 const TERRITORY_BORDERS = [
   ['GI', 'ES'],
-  ['ES', 'MA']
+  ['ES', 'MA'],
+  ['GB', 'CY']    // 아크로티리·데켈리아(영국 주권기지지역) — 키프로스 섬 안에 있으나 지도에 없다
 ];
 let ADJ_X = null;
 function extraAdjacency() {
@@ -232,6 +233,10 @@ function neighborEntities(ent, incTerr) {
   ent.members.forEach(m => {
     const list = [...(adj[m] || [])];
     if (ext && ext[m]) list.push(...ext[m]);
+    // 속령 → 본국 (한 방향). 지브롤터에 닿으면 영국까지 이어진다.
+    // 반대 방향(본국 → 속령)은 attachTerritories 가 확장이 끝난 뒤 붙이므로,
+    // 속령이 바다 건너 다음 확장의 발판이 되지는 않는다.
+    if (incTerr && TERRITORY_OF[m]) list.push(TERRITORY_OF[m]);
     list.forEach(n => {
       const e2 = entOf(n);
       if (!e2 || e2.id === ent.id || e2.hidden) return;
