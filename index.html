@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>플래그 맵 제작기</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <h1>플래그 맵 제작기</h1>
+  <div class="spacer"></div>
+  <input type="search" id="search" placeholder="국가 검색 (예: Korea)" autocomplete="off">
+  <div id="search-results"></div>
+  <button id="btn-merge" title="선택한 나라들을 하나로 병합 (Ctrl+M)">병합</button>
+  <button id="btn-unmerge" title="병합 해제 (Ctrl+Shift+M)">병합 해제</button>
+  <span class="sep"></span>
+  <button id="btn-save">저장</button>
+  <button id="btn-load">불러오기</button>
+  <span class="sep"></span>
+  <label id="res-box" title="PNG 가로 해상도 (px)">
+    <input type="number" id="opt-exw" min="100" max="20000" step="100" value="4000"><i>px</i>
+  </label>
+  <button id="btn-png" class="primary">PNG</button>
+  <button id="btn-svg" class="primary">SVG</button>
+</header>
+
+<main>
+  <div id="stage">
+    <div id="map-wrap"><!-- SVG injected here --></div>
+    <div id="tooltip"></div>
+    <div id="tool-ctl">
+      <button data-tool="pick" class="on" title="클릭 선택 (V)">↖</button>
+      <button data-tool="rect" title="직사각형 선택 (R)">▭</button>
+    </div>
+    <div id="zoom-ctl">
+      <button data-zoom="in">+</button>
+      <button data-zoom="out">−</button>
+      <button data-zoom="reset" title="전체 보기">⤢</button>
+    </div>
+    <div id="hint">클릭: 선택 · Ctrl/Shift+클릭: 다중 선택 · 드래그: 이동 · 휠: 확대</div>
+  </div>
+
+  <aside id="panel">
+    <section class="pane">
+      <div class="pane-head">
+        <h2 id="sel-title">선택 없음</h2>
+        <span id="sel-count" class="badge"></span>
+      </div>
+      <div id="sel-members" class="members"></div>
+      <label class="row">
+        <span>이름</span>
+        <input type="text" id="entity-name" placeholder="국가 이름" disabled>
+      </label>
+    </section>
+
+    <section class="pane">
+      <h3>국기</h3>
+      <div class="tabs" id="flag-tabs">
+        <button class="tab active" data-tab="preset">실제 국기</button>
+        <button class="tab" data-tab="design">디자인</button>
+        <button class="tab" data-tab="upload">이미지</button>
+        <button class="tab" data-tab="solid">단색</button>
+      </div>
+
+      <div class="tabpane active" data-pane="preset">
+        <p class="muted">flagcdn.com 에서 실제 국기를 불러옵니다 (인터넷 필요).</p>
+        <button id="btn-own-flag" class="wide">선택한 나라의 자기 국기 적용</button>
+        <label class="row">
+          <span>다른 나라</span>
+          <select id="preset-country"></select>
+        </label>
+        <button id="btn-apply-preset" class="wide primary">적용</button>
+      </div>
+
+      <div class="tabpane" data-pane="design">
+        <label class="row"><span>방향</span>
+          <select id="d-dir">
+            <option value="h">가로 줄무늬</option>
+            <option value="v">세로 줄무늬</option>
+            <option value="dg">대각선</option>
+          </select>
+        </label>
+        <label class="row"><span>줄 수</span>
+          <input type="range" id="d-count" min="1" max="5" value="3"><output id="d-count-o">3</output>
+        </label>
+        <div id="d-colors" class="swatches"></div>
+        <label class="row"><span>문양</span>
+          <select id="d-emblem">
+            <option value="none">없음</option>
+            <option value="circle">원 (중앙)</option>
+            <option value="cross">노르딕 십자</option>
+            <option value="canton">캔톤 (좌상단)</option>
+            <option value="triangle">삼각형 (좌측)</option>
+            <option value="star">별 (중앙)</option>
+          </select>
+        </label>
+        <label class="row"><span>문양 색</span>
+          <span class="col"><input type="color" id="d-ec" value="#ffffff"><input type="range" class="alpha" id="d-ec-a" min="0" max="100" value="100"></span>
+        </label>
+        <label class="row"><span>문양 크기</span><input type="range" id="d-emblem-size" min="10" max="90" value="40"></label>
+        <div class="preview-wrap"><div id="d-preview" class="checker"></div></div>
+        <button id="btn-apply-design" class="wide primary">적용</button>
+      </div>
+
+      <div class="tabpane" data-pane="upload">
+        <p class="muted">PNG / JPG / SVG 이미지를 국기로 사용합니다.</p>
+        <input type="file" id="file-flag" accept="image/*">
+        <div class="preview-wrap"><div id="u-preview" class="checker"></div></div>
+        <button id="btn-apply-upload" class="wide primary" disabled>적용</button>
+      </div>
+
+      <div class="tabpane" data-pane="solid">
+        <label class="row"><span>색상</span>
+          <span class="col"><input type="color" id="solid-color" value="#c0392b"><input type="range" class="alpha" id="solid-color-a" min="0" max="100" value="100"></span>
+        </label>
+        <button id="btn-apply-solid" class="wide primary">적용</button>
+      </div>
+
+      <button id="btn-clear-flag" class="wide danger-ghost">국기 제거</button>
+    </section>
+
+    <section class="pane">
+      <h3>국기 배치</h3>
+      <div class="tabs" id="place-tabs">
+        <button class="tab active" data-place="auto">자동 (영역에 맞춤)</button>
+        <button class="tab" data-place="manual">수동</button>
+      </div>
+      <div id="mode-fields" hidden>
+        <label class="row"><span>바깥 영역</span>
+          <select id="fmode" title="국기 상자 밖을 어떻게 채울지 — 수동 배치에서 주로 나타납니다">
+            <option value="clamp">가장자리 늘이기</option>
+            <option value="tile">국기 반복</option>
+            <option value="solid">단색 채움</option>
+          </select>
+        </label>
+        <label class="row" id="fbg-row" hidden><span>채움 색</span>
+          <span class="col"><input type="color" id="fbg" value="#f4f4f2"><input type="range" class="alpha" id="fbg-a" min="0" max="100" value="100"></span>
+        </label>
+      </div>
+      <div id="place-fields" hidden>
+        <div class="grid2">
+          <label class="row s"><span>X</span><input type="number" id="pl-x" step="0.5"></label>
+          <label class="row s"><span>Y</span><input type="number" id="pl-y" step="0.5"></label>
+          <label class="row s"><span>너비</span><input type="number" id="pl-w" step="0.5" min="0.1"></label>
+          <label class="row s"><span>높이</span><input type="number" id="pl-h" step="0.5" min="0.1"></label>
+        </div>
+        <label class="row"><span>회전</span><input type="range" id="pl-rot" min="-180" max="180" step="1" value="0"><output id="pl-rot-o">0°</output></label>
+        <button id="btn-place-reset" class="wide">국가 영역에 맞추기</button>
+        <p class="muted mt">지도 위 점선 사각형을 끌어 이동, 모서리 손잡이를 끌어 크기 조절.<br>
+          <b>Shift</b> 또는 <b>Ctrl</b> 을 누른 채 끌면 비율 유지.</p>
+      </div>
+      <p class="muted" id="place-hint">국가를 하나만 선택하면 배치를 조절할 수 있습니다.</p>
+    </section>
+
+    <section class="pane">
+      <h3>지도 설정</h3>
+      <label class="row"><span>바다 색</span>
+        <span class="col"><input type="color" id="opt-ocean" value="#dfe9f3"><input type="range" class="alpha" id="opt-ocean-a" min="0" max="100" value="100"></span>
+      </label>
+      <label class="row"><span>기본 육지</span>
+        <span class="col"><input type="color" id="opt-land" value="#f4f4f2"><input type="range" class="alpha" id="opt-land-a" min="0" max="100" value="100"></span>
+      </label>
+      <label class="row"><span>국경선 색</span>
+        <span class="col"><input type="color" id="opt-border" value="#8a8f98"><input type="range" class="alpha" id="opt-border-a" min="0" max="100" value="100"></span>
+      </label>
+      <label class="row"><span>국경선 굵기</span><input type="range" id="opt-bw" min="0" max="4" step="0.25" value="1"></label>
+      <label class="row check"><input type="checkbox" id="opt-fit"><span>국기 비율 유지 (잘라내기)</span></label>
+      <label class="row check"><input type="checkbox" id="opt-per-country"><span>병합 시 나라별로 국기 반복</span></label>
+    </section>
+
+    <section class="pane">
+      <div class="pane-head"><h3>정리</h3><span id="hidden-count" class="badge">0</span></div>
+      <p class="muted">선택했거나 편집한(국기 지정·병합·이름 변경·배치 변경) 국가만 남기고 나머지는 지도에서 제거합니다.</p>
+      <button id="btn-keep" class="wide primary">선택/편집한 국가만 남기기</button>
+      <button id="btn-hide-sel" class="wide">선택한 국가 제거</button>
+      <button id="btn-fit-visible" class="wide">남은 국가에 화면 맞추기</button>
+      <button id="btn-restore" class="wide">제거한 국가 모두 복원</button>
+    </section>
+
+    <section class="pane">
+      <div class="pane-head"><h3>병합된 국가</h3><span id="merged-count" class="badge">0</span></div>
+      <div id="merged-list" class="merged-list"></div>
+    </section>
+  </aside>
+</main>
+
+<input type="file" id="file-load" accept="application/json" hidden>
+
+<script src="map-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
