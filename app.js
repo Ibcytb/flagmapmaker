@@ -915,7 +915,7 @@ function initUI() {
   };
   $('#btn-new-group').onclick = () => {
     const ent = soloSelection(); if (!ent) return;
-    const picked = $$('#group-picker span.on').map(s => s.textContent);
+    const picked = $$('#group-picker span.on').map(s => s.dataset.iso);
     if (!picked.length) { alert('그룹으로 묶을 나라를 먼저 고르세요.'); return; }
     snapshot();
     ent.groups = ent.groups || [];
@@ -1405,8 +1405,16 @@ function updateScopePane() {
     (ent.groups || []).forEach(g => g.members.forEach(m => inGroup.add(m)));
     ent.members.forEach(m => {
       const s = document.createElement('span');
-      s.textContent = m;
-      s.title = ORIG[m] || m;
+      s.dataset.iso = m;                                  // 표시가 아니라 이 값으로 그룹을 만든다
+      s.title = `${ORIG[m] || m} (${m})`;
+      const img = document.createElement('img');
+      img.src = `https://flagcdn.com/w40/${m.split('-')[0].toLowerCase()}.png`;
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onerror = () => img.remove();                   // 오프라인이면 이름만 표시
+      const nm = document.createElement('b');
+      nm.textContent = ORIG[m] || m;
+      s.append(img, nm);
       if (inGroup.has(m)) s.classList.add('grouped');
       s.onclick = () => { s.classList.toggle('on'); };
       picker.appendChild(s);
